@@ -1,0 +1,18 @@
+#include "aicpu_api.h"
+
+struct KernelArgs {
+    unsigned int a;
+    unsigned int b;
+    unsigned int *Device;
+};
+
+unsigned int NormalFunc(unsigned int a, unsigned int b) {
+    return a + b;
+}
+
+__global__ __aicpu__ unsigned int KernelAicpu(void *args) {
+    KernelArgs *cfg = (KernelArgs *)args;
+    *(cfg->Device) = NormalFunc(cfg->a, cfg->b);
+    AscendC::printf("Device Result: 0x%08x\n", *(cfg->Device));
+    return 0;
+}
