@@ -1,6 +1,0 @@
-#include "aicpu_api.h"
-
-__global__ __aicpu__ int foo_aicpu(void *arg) {
-    AscendC::printf("Hello from AICPU\n");
-    return 0;
-}

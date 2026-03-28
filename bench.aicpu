@@ -1,0 +1,25 @@
+#include "aicpu_api.h"
+#include "bench_target.h"
+
+// The simplest way to bring an existing C helper onto AICPU is to compile it
+// into the same device translation unit.
+#include "bench_target.c"
+
+struct BenchArgs {
+    const int *input;
+    int *output;
+    int n;
+    int repeat;
+};
+
+__global__ __aicpu__ int BenchKernel(void *arg) {
+    BenchArgs *cfg = (BenchArgs *)arg;
+    int result = 0;
+
+    for (int i = 0; i < cfg->repeat; ++i) {
+        result = bench_target_sum(cfg->input, cfg->n);
+    }
+
+    cfg->output[0] = result;
+    return 0;
+}
