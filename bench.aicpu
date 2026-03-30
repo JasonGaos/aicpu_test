@@ -1,8 +1,8 @@
 #include "aicpu_api.h"
 #include "bench_target.h"
 
-// The simplest way to bring an existing C helper onto AICPU is to compile it
-// into the same device translation unit.
+// Header declarations alone are not enough on AICPU. The implementation must
+// also be compiled into the same device translation unit.
 #include "bench_target.c"
 
 struct BenchArgs {
@@ -18,11 +18,21 @@ __global__ __aicpu__ int BenchKernel(void *arg) {
     BenchArgs *cfg = (BenchArgs *)arg;
     if (cfg == nullptr || cfg->key == nullptr || cfg->iv == nullptr || cfg->plaintext == nullptr ||
         cfg->ciphertext == nullptr || cfg->msg_len == 0) {
+        AscendC::printf("BenchKernel invalid args\n");
         return 1;
     }
 
+    AscendC::printf("BenchKernel enter msg_len=%u repeat=%d\n", (unsigned int)cfg->msg_len,
+                    cfg->repeat);
     for (int i = 0; i < cfg->repeat; ++i) {
+        if (i == 0) {
+            AscendC::printf("before func key0=%u iv0=%u pt0=%u\n", (unsigned int)cfg->key[0],
+                            (unsigned int)cfg->iv[0], (unsigned int)cfg->plaintext[0]);
+        }
         func(cfg->key, cfg->iv, cfg->plaintext, cfg->ciphertext, cfg->msg_len);
+        if (i == 0) {
+            AscendC::printf("after func ct0=%u\n", (unsigned int)cfg->ciphertext[0]);
+        }
     }
     return 0;
 }

@@ -32,9 +32,10 @@ static int CheckAcl(const char *step, aclError err) {
 int main() {
     const size_t key_bytes = 32;
     const size_t iv_bytes = 16;
-    const size_t msg_len = 1024;
+    const size_t msg_len = 64;
     const int repeat = 1;
-    const int launches = 20;
+    const int warmups = 1;
+    const int launches = 1;
     const size_t output_bytes = msg_len * sizeof(uint8);
 
     uint8 *host_key = (uint8 *)malloc(key_bytes);
@@ -153,7 +154,7 @@ int main() {
     args.msg_len = msg_len;
     args.repeat = repeat;
 
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < warmups; ++i) {
         BenchKernel<<<1, nullptr, stream>>>(&args, sizeof(args));
     }
     if (!CheckAcl("aclrtSynchronizeStream warmup", aclrtSynchronizeStream(stream))) {

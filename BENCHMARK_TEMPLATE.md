@@ -32,9 +32,10 @@ void func(const uint8 *key, const uint8 *iv, const uint8 *plaintext,
 ```
 
 1. Replace the placeholder implementation in `bench_target.c` with your real function body.
-2. Keep `BenchArgs` in `bench.aicpu` and `bench_main.cce` aligned byte-for-byte.
-3. Make sure `key`, `iv`, `plaintext`, and `ciphertext` inside `BenchArgs` are device pointers from `aclrtMalloc`.
-4. Start with `repeat = 1` in `bench_main.cce` and raise it gradually after correctness is confirmed.
-5. Adjust the key and IV lengths in `bench_main.cce` to match your algorithm.
+2. Keep the implementation compiled into `bench.aicpu`; including only your header is not enough.
+3. Keep `BenchArgs` in `bench.aicpu` and `bench_main.cce` aligned byte-for-byte.
+4. Make sure `key`, `iv`, `plaintext`, and `ciphertext` inside `BenchArgs` are device pointers from `aclrtMalloc`.
+5. Start with tiny values in `bench_main.cce` (`msg_len = 64`, `repeat = 1`, `warmups = 1`, `launches = 1`) and raise them gradually after correctness is confirmed.
+6. Adjust the key and IV lengths in `bench_main.cce` to match your algorithm.
 
 This template keeps `bench_target.c` in the same AICPU translation unit by including it from `bench.aicpu`.
