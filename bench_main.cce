@@ -3,18 +3,20 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <time.h>
 
 struct BenchArgs {
     const uint8 *key;
     const uint8 *iv;
-    const uint8 *plaintext;
-    uint8 *ciphertext;
+    const uint8 *input;
+    uint8 *output;
     size_t msg_len;
     int repeat;
 };
 
-extern __global__ __aicpu__ int BenchKernel(void *arg);
+extern __global__ __aicpu__ int BenchEncryptKernel(void *arg);
+extern __global__ __aicpu__ int BenchDecryptKernel(void *arg);
 
 static double ElapsedUs(const struct timespec *start, const struct timespec *end) {
     return (double)(end->tv_sec - start->tv_sec) * 1000000.0 +
@@ -29,6 +31,45 @@ static int CheckAcl(const char *step, aclError err) {
     return 1;
 }
 
+static unsigned int ChecksumBytes(const uint8 *data, size_t len) {
+    unsigned int checksum = 0;
+    for (size_t i = 0; i < len; ++i) {
+        checksum = (checksum * 131u) + data[i];
+    }
+    return checksum;
+}
+
+static void PrintBytesPrefix(const char *label, const uint8 *data, size_t len) {
+    printf("%s[0..15]=", label);
+    for (size_t i = 0; i < 16 && i < len; ++i) {
+        printf(" %02x", data[i]);
+    }
+    printf("\n");
+}
+
+static void PrintBenchmarkSummary(const char *label, const uint8 *output, size_t msg_len,
+                                  int repeat, int launches, double total_us) {
+    double total_sec = total_us / 1000000.0;
+    double total_bytes = (double)msg_len * (double)repeat * (double)launches;
+    double launch_us = total_us / (double)launches;
+    double call_ns = (total_us * 1000.0) / ((double)launches * (double)repeat);
+    double throughput_gbps = 0.0;
+    double throughput_gibps = 0.0;
+    if (total_sec > 0.0) {
+        throughput_gbps = total_bytes / total_sec / 1000000000.0;
+        throughput_gibps = total_bytes / total_sec / 1073741824.0;
+    }
+
+    printf("[%s] checksum=0x%08x\n", label, ChecksumBytes(output, msg_len));
+    PrintBytesPrefix(label, output, msg_len);
+    printf("[%s] timed bytes: %.0f\n", label, total_bytes);
+    printf("[%s] total launch+sync time: %.3f us\n", label, total_us);
+    printf("[%s] avg per kernel launch: %.3f us\n", label, launch_us);
+    printf("[%s] approx avg per function call: %.3f ns\n", label, call_ns);
+    printf("[%s] throughput: %.6f GB/s\n", label, throughput_gbps);
+    printf("[%s] throughput: %.6f GiB/s\n", label, throughput_gibps);
+}
+
 int main() {
     const size_t key_bytes = 32;
     const size_t iv_bytes = 16;
@@ -36,7 +77,7 @@ int main() {
     const int repeat = 1;
     const int warmups = 1;
     const int launches = 1;
-    const size_t output_bytes = msg_len * sizeof(uint8);
+    const size_t msg_bytes = msg_len * sizeof(uint8);
 
     uint8 *host_key = (uint8 *)malloc(key_bytes);
     uint8 *host_iv = (uint8 *)malloc(iv_bytes);
@@ -81,47 +122,34 @@ int main() {
     }
 
     aclrtStream stream = nullptr;
-    if (!CheckAcl("aclrtCreateStream", aclrtCreateStream(&stream))) {
-        aclrtResetDevice(0);
-        aclFinalize();
-        free(host_plaintext);
-        free(host_iv);
-        free(host_key);
-        return 1;
-    }
-
     uint8 *device_key = nullptr;
     uint8 *device_iv = nullptr;
     uint8 *device_plaintext = nullptr;
     uint8 *device_ciphertext = nullptr;
+    uint8 *device_decrypted = nullptr;
+    uint8 *host_ciphertext = nullptr;
+    uint8 *host_decrypted = nullptr;
+    int status = 1;
+    double encrypt_total_us = 0.0;
+    double decrypt_total_us = 0.0;
+
+    if (!CheckAcl("aclrtCreateStream", aclrtCreateStream(&stream))) {
+        goto cleanup;
+    }
+
     if (!CheckAcl("aclrtMalloc key",
                   aclrtMalloc((void **)&device_key, key_bytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
         !CheckAcl("aclrtMalloc iv",
                   aclrtMalloc((void **)&device_iv, iv_bytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
         !CheckAcl("aclrtMalloc plaintext",
-                  aclrtMalloc((void **)&device_plaintext, msg_len, ACL_MEM_MALLOC_HUGE_FIRST)) ||
+                  aclrtMalloc((void **)&device_plaintext, msg_bytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
         !CheckAcl("aclrtMalloc ciphertext",
-                  aclrtMalloc((void **)&device_ciphertext, output_bytes,
+                  aclrtMalloc((void **)&device_ciphertext, msg_bytes,
+                              ACL_MEM_MALLOC_HUGE_FIRST)) ||
+        !CheckAcl("aclrtMalloc decrypted",
+                  aclrtMalloc((void **)&device_decrypted, msg_bytes,
                               ACL_MEM_MALLOC_HUGE_FIRST))) {
-        if (device_key != nullptr) {
-            aclrtFree(device_key);
-        }
-        if (device_iv != nullptr) {
-            aclrtFree(device_iv);
-        }
-        if (device_plaintext != nullptr) {
-            aclrtFree(device_plaintext);
-        }
-        if (device_ciphertext != nullptr) {
-            aclrtFree(device_ciphertext);
-        }
-        aclrtDestroyStream(stream);
-        aclrtResetDevice(0);
-        aclFinalize();
-        free(host_plaintext);
-        free(host_iv);
-        free(host_key);
-        return 1;
+        goto cleanup;
     }
 
     if (!CheckAcl("aclrtMemcpy key H2D",
@@ -131,139 +159,134 @@ int main() {
                   aclrtMemcpy(device_iv, iv_bytes, host_iv, iv_bytes,
                               ACL_MEMCPY_HOST_TO_DEVICE)) ||
         !CheckAcl("aclrtMemcpy plaintext H2D",
-                  aclrtMemcpy(device_plaintext, msg_len, host_plaintext, msg_len,
+                  aclrtMemcpy(device_plaintext, msg_bytes, host_plaintext, msg_bytes,
                               ACL_MEMCPY_HOST_TO_DEVICE))) {
-        aclrtFree(device_ciphertext);
-        aclrtFree(device_plaintext);
-        aclrtFree(device_iv);
-        aclrtFree(device_key);
-        aclrtDestroyStream(stream);
-        aclrtResetDevice(0);
-        aclFinalize();
-        free(host_plaintext);
-        free(host_iv);
-        free(host_key);
-        return 1;
+        goto cleanup;
     }
 
-    BenchArgs args;
-    args.key = device_key;
-    args.iv = device_iv;
-    args.plaintext = device_plaintext;
-    args.ciphertext = device_ciphertext;
-    args.msg_len = msg_len;
-    args.repeat = repeat;
-
-    for (int i = 0; i < warmups; ++i) {
-        BenchKernel<<<1, nullptr, stream>>>(&args, sizeof(args));
-    }
-    if (!CheckAcl("aclrtSynchronizeStream warmup", aclrtSynchronizeStream(stream))) {
-        aclrtFree(device_ciphertext);
-        aclrtFree(device_plaintext);
-        aclrtFree(device_iv);
-        aclrtFree(device_key);
-        aclrtDestroyStream(stream);
-        aclrtResetDevice(0);
-        aclFinalize();
-        free(host_plaintext);
-        free(host_iv);
-        free(host_key);
-        return 1;
-    }
-
-    struct timespec start;
-    struct timespec end;
-    clock_gettime(CLOCK_MONOTONIC, &start);
-    for (int i = 0; i < launches; ++i) {
-        BenchKernel<<<1, nullptr, stream>>>(&args, sizeof(args));
-    }
-    if (!CheckAcl("aclrtSynchronizeStream benchmark", aclrtSynchronizeStream(stream))) {
-        aclrtFree(device_ciphertext);
-        aclrtFree(device_plaintext);
-        aclrtFree(device_iv);
-        aclrtFree(device_key);
-        aclrtDestroyStream(stream);
-        aclrtResetDevice(0);
-        aclFinalize();
-        free(host_plaintext);
-        free(host_iv);
-        free(host_key);
-        return 1;
-    }
-    clock_gettime(CLOCK_MONOTONIC, &end);
-
-    uint8 *host_ciphertext = nullptr;
-    if (!CheckAcl("aclrtMallocHost", aclrtMallocHost((void **)&host_ciphertext, output_bytes))) {
-        aclrtFree(device_ciphertext);
-        aclrtFree(device_plaintext);
-        aclrtFree(device_iv);
-        aclrtFree(device_key);
-        aclrtDestroyStream(stream);
-        aclrtResetDevice(0);
-        aclFinalize();
-        free(host_plaintext);
-        free(host_iv);
-        free(host_key);
-        return 1;
-    }
-
-    if (!CheckAcl("aclrtMemcpy ciphertext D2H",
-                  aclrtMemcpy(host_ciphertext, output_bytes, device_ciphertext, output_bytes,
-                              ACL_MEMCPY_DEVICE_TO_HOST))) {
-        aclrtFreeHost(host_ciphertext);
-        aclrtFree(device_ciphertext);
-        aclrtFree(device_plaintext);
-        aclrtFree(device_iv);
-        aclrtFree(device_key);
-        aclrtDestroyStream(stream);
-        aclrtResetDevice(0);
-        aclFinalize();
-        free(host_plaintext);
-        free(host_iv);
-        free(host_key);
-        return 1;
+    if (!CheckAcl("aclrtMallocHost ciphertext", aclrtMallocHost((void **)&host_ciphertext, msg_bytes)) ||
+        !CheckAcl("aclrtMallocHost decrypted", aclrtMallocHost((void **)&host_decrypted, msg_bytes))) {
+        goto cleanup;
     }
 
     {
-        unsigned int checksum = 0;
-        double total_us = ElapsedUs(&start, &end);
-        double total_sec = total_us / 1000000.0;
-        double total_bytes = (double)msg_len * (double)repeat * (double)launches;
-        double launch_us = total_us / (double)launches;
-        double call_ns = (total_us * 1000.0) / ((double)launches * (double)repeat);
-        double throughput_gbps = 0.0;
-        double throughput_gibps = 0.0;
-        if (total_sec > 0.0) {
-            throughput_gbps = total_bytes / total_sec / 1000000000.0;
-            throughput_gibps = total_bytes / total_sec / 1073741824.0;
+        BenchArgs encrypt_args;
+        struct timespec start;
+        struct timespec end;
+
+        encrypt_args.key = device_key;
+        encrypt_args.iv = device_iv;
+        encrypt_args.input = device_plaintext;
+        encrypt_args.output = device_ciphertext;
+        encrypt_args.msg_len = msg_len;
+        encrypt_args.repeat = repeat;
+
+        for (int i = 0; i < warmups; ++i) {
+            BenchEncryptKernel<<<1, nullptr, stream>>>(&encrypt_args, sizeof(encrypt_args));
         }
-        for (size_t i = 0; i < msg_len; ++i) {
-            checksum = (checksum * 131u) + host_ciphertext[i];
+        if (!CheckAcl("aclrtSynchronizeStream encrypt warmup", aclrtSynchronizeStream(stream))) {
+            goto cleanup;
         }
-        printf("ciphertext checksum=0x%08x\n", checksum);
-        printf("ciphertext[0..15]=");
-        for (size_t i = 0; i < 16 && i < msg_len; ++i) {
-            printf(" %02x", host_ciphertext[i]);
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (int i = 0; i < launches; ++i) {
+            BenchEncryptKernel<<<1, nullptr, stream>>>(&encrypt_args, sizeof(encrypt_args));
         }
-        printf("\n");
-        printf("timed encrypted bytes: %.0f\n", total_bytes);
-        printf("total launch+sync time: %.3f us\n", total_us);
-        printf("avg per kernel launch: %.3f us\n", launch_us);
-        printf("approx avg per func call: %.3f ns\n", call_ns);
-        printf("throughput: %.6f GB/s\n", throughput_gbps);
-        printf("throughput: %.6f GiB/s\n", throughput_gibps);
+        if (!CheckAcl("aclrtSynchronizeStream encrypt benchmark", aclrtSynchronizeStream(stream))) {
+            goto cleanup;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        encrypt_total_us = ElapsedUs(&start, &end);
     }
 
-    aclrtFreeHost(host_ciphertext);
-    aclrtFree(device_ciphertext);
-    aclrtFree(device_plaintext);
-    aclrtFree(device_iv);
-    aclrtFree(device_key);
-    aclrtDestroyStream(stream);
+    if (!CheckAcl("aclrtMemcpy ciphertext D2H",
+                  aclrtMemcpy(host_ciphertext, msg_bytes, device_ciphertext, msg_bytes,
+                              ACL_MEMCPY_DEVICE_TO_HOST))) {
+        goto cleanup;
+    }
+
+    {
+        BenchArgs decrypt_args;
+        struct timespec start;
+        struct timespec end;
+
+        decrypt_args.key = device_key;
+        decrypt_args.iv = device_iv;
+        decrypt_args.input = device_ciphertext;
+        decrypt_args.output = device_decrypted;
+        decrypt_args.msg_len = msg_len;
+        decrypt_args.repeat = repeat;
+
+        for (int i = 0; i < warmups; ++i) {
+            BenchDecryptKernel<<<1, nullptr, stream>>>(&decrypt_args, sizeof(decrypt_args));
+        }
+        if (!CheckAcl("aclrtSynchronizeStream decrypt warmup", aclrtSynchronizeStream(stream))) {
+            goto cleanup;
+        }
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (int i = 0; i < launches; ++i) {
+            BenchDecryptKernel<<<1, nullptr, stream>>>(&decrypt_args, sizeof(decrypt_args));
+        }
+        if (!CheckAcl("aclrtSynchronizeStream decrypt benchmark", aclrtSynchronizeStream(stream))) {
+            goto cleanup;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &end);
+        decrypt_total_us = ElapsedUs(&start, &end);
+    }
+
+    if (!CheckAcl("aclrtMemcpy decrypted D2H",
+                  aclrtMemcpy(host_decrypted, msg_bytes, device_decrypted, msg_bytes,
+                              ACL_MEMCPY_DEVICE_TO_HOST))) {
+        goto cleanup;
+    }
+
+    PrintBenchmarkSummary("encrypt", host_ciphertext, msg_len, repeat, launches, encrypt_total_us);
+    PrintBenchmarkSummary("decrypt", host_decrypted, msg_len, repeat, launches, decrypt_total_us);
+
+    if (memcmp(host_plaintext, host_decrypted, msg_bytes) == 0) {
+        printf("[correctness] PASS: decrypted plaintext matches original plaintext\n");
+    } else {
+        size_t mismatch = 0;
+        while (mismatch < msg_len && host_plaintext[mismatch] == host_decrypted[mismatch]) {
+            ++mismatch;
+        }
+        printf("[correctness] FAIL at byte %zu: expected=%02x got=%02x\n", mismatch,
+               host_plaintext[mismatch], host_decrypted[mismatch]);
+        goto cleanup;
+    }
+
+    status = 0;
+
+cleanup:
+    if (host_decrypted != nullptr) {
+        aclrtFreeHost(host_decrypted);
+    }
+    if (host_ciphertext != nullptr) {
+        aclrtFreeHost(host_ciphertext);
+    }
+    if (device_decrypted != nullptr) {
+        aclrtFree(device_decrypted);
+    }
+    if (device_ciphertext != nullptr) {
+        aclrtFree(device_ciphertext);
+    }
+    if (device_plaintext != nullptr) {
+        aclrtFree(device_plaintext);
+    }
+    if (device_iv != nullptr) {
+        aclrtFree(device_iv);
+    }
+    if (device_key != nullptr) {
+        aclrtFree(device_key);
+    }
+    if (stream != nullptr) {
+        aclrtDestroyStream(stream);
+    }
     aclrtResetDevice(0);
     aclFinalize();
     free(host_plaintext);
     free(host_iv);
     free(host_key);
-    return 0;
+    return status;
 }

@@ -15,6 +15,8 @@ extern "C" {
 
 void func(const uint8 *key, const uint8 *iv, const uint8 *plaintext, uint8 *ciphertext,
           const size_t msg_len);
+void decryp(const uint8 *key, const uint8 *iv, const uint8 *ciphertext, uint8 *plaintext,
+            const size_t msg_len);
 
 #ifdef __cplusplus
 }

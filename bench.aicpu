@@ -8,31 +8,37 @@
 struct BenchArgs {
     const uint8 *key;
     const uint8 *iv;
-    const uint8 *plaintext;
-    uint8 *ciphertext;
+    const uint8 *input;
+    uint8 *output;
     size_t msg_len;
     int repeat;
 };
 
-__global__ __aicpu__ int BenchKernel(void *arg) {
+static int ValidateArgs(const BenchArgs *cfg) {
+    return cfg != nullptr && cfg->key != nullptr && cfg->iv != nullptr && cfg->input != nullptr &&
+           cfg->output != nullptr && cfg->msg_len != 0 && cfg->repeat > 0;
+}
+
+__global__ __aicpu__ int BenchEncryptKernel(void *arg) {
     BenchArgs *cfg = (BenchArgs *)arg;
-    if (cfg == nullptr || cfg->key == nullptr || cfg->iv == nullptr || cfg->plaintext == nullptr ||
-        cfg->ciphertext == nullptr || cfg->msg_len == 0) {
-        AscendC::printf("BenchKernel invalid args\n");
+    if (!ValidateArgs(cfg)) {
         return 1;
     }
 
-    AscendC::printf("BenchKernel enter msg_len=%u repeat=%d\n", (unsigned int)cfg->msg_len,
-                    cfg->repeat);
     for (int i = 0; i < cfg->repeat; ++i) {
-        if (i == 0) {
-            AscendC::printf("before func key0=%u iv0=%u pt0=%u\n", (unsigned int)cfg->key[0],
-                            (unsigned int)cfg->iv[0], (unsigned int)cfg->plaintext[0]);
-        }
-        func(cfg->key, cfg->iv, cfg->plaintext, cfg->ciphertext, cfg->msg_len);
-        if (i == 0) {
-            AscendC::printf("after func ct0=%u\n", (unsigned int)cfg->ciphertext[0]);
-        }
+        func(cfg->key, cfg->iv, cfg->input, cfg->output, cfg->msg_len);
+    }
+    return 0;
+}
+
+__global__ __aicpu__ int BenchDecryptKernel(void *arg) {
+    BenchArgs *cfg = (BenchArgs *)arg;
+    if (!ValidateArgs(cfg)) {
+        return 1;
+    }
+
+    for (int i = 0; i < cfg->repeat; ++i) {
+        decryp(cfg->key, cfg->iv, cfg->input, cfg->output, cfg->msg_len);
     }
     return 0;
 }
