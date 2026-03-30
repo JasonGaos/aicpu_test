@@ -4,7 +4,7 @@ This template shows how to benchmark a normal C function on AICPU.
 
 Files:
 
-- `bench_target.h`: the function declaration you will replace with your own
+- `bench_target.h`: the function declaration under test
 - `bench_target.c`: the C implementation under test
 - `bench.aicpu`: the AICPU entry kernel that calls the target function
 - `bench_main.cce`: the host-side harness that launches the kernel and times it
@@ -24,10 +24,17 @@ export LD_LIBRARY_PATH=${INSTALL_DIR}/lib64:$PWD:${LD_LIBRARY_PATH}
 
 ## How to adapt it
 
-1. Replace the declaration in `bench_target.h` with your function signature.
-2. Replace the implementation in `bench_target.c` with your actual C code.
-3. Update `BenchArgs` in `bench.aicpu` and `bench_main.cce` to carry your inputs and outputs.
-4. Update `BenchKernel` in `bench.aicpu` to call your function inside the `repeat` loop.
-5. Update host buffer allocation and input initialization in `bench_main.cce`.
+The current template already matches this shape:
+
+```c
+void func(const uint8 *key, const uint8 *iv, const uint8 *plaintext,
+          uint8 *ciphertext, const size_t msg_len);
+```
+
+1. Replace the placeholder implementation in `bench_target.c` with your real function body.
+2. Keep `BenchArgs` in `bench.aicpu` and `bench_main.cce` aligned byte-for-byte.
+3. Make sure `key`, `iv`, `plaintext`, and `ciphertext` inside `BenchArgs` are device pointers from `aclrtMalloc`.
+4. Start with `repeat = 1` in `bench_main.cce` and raise it gradually after correctness is confirmed.
+5. Adjust the key and IV lengths in `bench_main.cce` to match your algorithm.
 
 This template keeps `bench_target.c` in the same AICPU translation unit by including it from `bench.aicpu`.

@@ -1,9 +1,13 @@
 #include "bench_target.h"
 
-int bench_target_sum(const int *input, int n) {
-    int total = 0;
-    for (int i = 0; i < n; ++i) {
-        total += input[i];
+enum {
+    BENCH_KEY_BYTES = 32,
+    BENCH_IV_BYTES = 16,
+};
+
+void func(const uint8 *key, const uint8 *iv, const uint8 *plaintext, uint8 *ciphertext,
+          const size_t msg_len) {
+    for (size_t i = 0; i < msg_len; ++i) {
+        ciphertext[i] = (uint8)(plaintext[i] ^ key[i % BENCH_KEY_BYTES] ^ iv[i % BENCH_IV_BYTES]);
     }
-    return total;
 }

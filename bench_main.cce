@@ -1,13 +1,16 @@
 #include "acl/acl.h"
+#include "bench_target.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
 
 struct BenchArgs {
-    const int *input;
-    int *output;
-    int n;
+    const uint8 *key;
+    const uint8 *iv;
+    const uint8 *plaintext;
+    uint8 *ciphertext;
+    size_t msg_len;
     int repeat;
 };
 
@@ -27,87 +30,143 @@ static int CheckAcl(const char *step, aclError err) {
 }
 
 int main() {
-    const int n = 1024;
-    const int repeat = 10000;
+    const size_t key_bytes = 32;
+    const size_t iv_bytes = 16;
+    const size_t msg_len = 1024;
+    const int repeat = 1;
     const int launches = 20;
-    const size_t input_bytes = (size_t)n * sizeof(int);
-    const size_t output_bytes = sizeof(int);
+    const size_t output_bytes = msg_len * sizeof(uint8);
 
-    int *host_input = (int *)malloc(input_bytes);
-    if (host_input == nullptr) {
-        fprintf(stderr, "malloc host_input failed\n");
+    uint8 *host_key = (uint8 *)malloc(key_bytes);
+    uint8 *host_iv = (uint8 *)malloc(iv_bytes);
+    uint8 *host_plaintext = (uint8 *)malloc(msg_len);
+    if (host_key == nullptr || host_iv == nullptr || host_plaintext == nullptr) {
+        fprintf(stderr, "malloc input buffers failed\n");
+        free(host_plaintext);
+        free(host_iv);
+        free(host_key);
         return 1;
     }
 
-    for (int i = 0; i < n; ++i) {
-        host_input[i] = i & 255;
+    for (size_t i = 0; i < key_bytes; ++i) {
+        host_key[i] = (uint8)(0x10 + (i & 0x0f));
+    }
+    for (size_t i = 0; i < iv_bytes; ++i) {
+        host_iv[i] = (uint8)(0x20 + i);
+    }
+    for (size_t i = 0; i < msg_len; ++i) {
+        host_plaintext[i] = (uint8)(i & 0xff);
     }
 
     if (!CheckAcl("aclInit", aclInit(nullptr))) {
-        free(host_input);
+        free(host_plaintext);
+        free(host_iv);
+        free(host_key);
         return 1;
     }
     if (!CheckAcl("aclrtSetDevice", aclrtSetDevice(0))) {
         aclFinalize();
-        free(host_input);
+        free(host_plaintext);
+        free(host_iv);
+        free(host_key);
         return 1;
+    }
+    {
+        aclError timeout_err = aclrtSetOpExecuteTimeOut(300);
+        if (timeout_err != ACL_ERROR_NONE) {
+            fprintf(stderr, "warning: aclrtSetOpExecuteTimeOut failed, aclError=%d\n",
+                    (int)timeout_err);
+        }
     }
 
     aclrtStream stream = nullptr;
     if (!CheckAcl("aclrtCreateStream", aclrtCreateStream(&stream))) {
         aclrtResetDevice(0);
         aclFinalize();
-        free(host_input);
+        free(host_plaintext);
+        free(host_iv);
+        free(host_key);
         return 1;
     }
 
-    int *device_input = nullptr;
-    int *device_output = nullptr;
-    if (!CheckAcl("aclrtMalloc input",
-                  aclrtMalloc((void **)&device_input, input_bytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
-        !CheckAcl("aclrtMalloc output",
-                  aclrtMalloc((void **)&device_output, output_bytes, ACL_MEM_MALLOC_HUGE_FIRST))) {
-        if (device_input != nullptr) {
-            aclrtFree(device_input);
+    uint8 *device_key = nullptr;
+    uint8 *device_iv = nullptr;
+    uint8 *device_plaintext = nullptr;
+    uint8 *device_ciphertext = nullptr;
+    if (!CheckAcl("aclrtMalloc key",
+                  aclrtMalloc((void **)&device_key, key_bytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
+        !CheckAcl("aclrtMalloc iv",
+                  aclrtMalloc((void **)&device_iv, iv_bytes, ACL_MEM_MALLOC_HUGE_FIRST)) ||
+        !CheckAcl("aclrtMalloc plaintext",
+                  aclrtMalloc((void **)&device_plaintext, msg_len, ACL_MEM_MALLOC_HUGE_FIRST)) ||
+        !CheckAcl("aclrtMalloc ciphertext",
+                  aclrtMalloc((void **)&device_ciphertext, output_bytes,
+                              ACL_MEM_MALLOC_HUGE_FIRST))) {
+        if (device_key != nullptr) {
+            aclrtFree(device_key);
         }
-        if (device_output != nullptr) {
-            aclrtFree(device_output);
+        if (device_iv != nullptr) {
+            aclrtFree(device_iv);
+        }
+        if (device_plaintext != nullptr) {
+            aclrtFree(device_plaintext);
+        }
+        if (device_ciphertext != nullptr) {
+            aclrtFree(device_ciphertext);
         }
         aclrtDestroyStream(stream);
         aclrtResetDevice(0);
         aclFinalize();
-        free(host_input);
+        free(host_plaintext);
+        free(host_iv);
+        free(host_key);
         return 1;
     }
 
-    if (!CheckAcl("aclrtMemcpy H2D",
-                  aclrtMemcpy(device_input, input_bytes, host_input, input_bytes,
+    if (!CheckAcl("aclrtMemcpy key H2D",
+                  aclrtMemcpy(device_key, key_bytes, host_key, key_bytes,
+                              ACL_MEMCPY_HOST_TO_DEVICE)) ||
+        !CheckAcl("aclrtMemcpy iv H2D",
+                  aclrtMemcpy(device_iv, iv_bytes, host_iv, iv_bytes,
+                              ACL_MEMCPY_HOST_TO_DEVICE)) ||
+        !CheckAcl("aclrtMemcpy plaintext H2D",
+                  aclrtMemcpy(device_plaintext, msg_len, host_plaintext, msg_len,
                               ACL_MEMCPY_HOST_TO_DEVICE))) {
-        aclrtFree(device_output);
-        aclrtFree(device_input);
+        aclrtFree(device_ciphertext);
+        aclrtFree(device_plaintext);
+        aclrtFree(device_iv);
+        aclrtFree(device_key);
         aclrtDestroyStream(stream);
         aclrtResetDevice(0);
         aclFinalize();
-        free(host_input);
+        free(host_plaintext);
+        free(host_iv);
+        free(host_key);
         return 1;
     }
 
     BenchArgs args;
-    args.input = device_input;
-    args.output = device_output;
-    args.n = n;
+    args.key = device_key;
+    args.iv = device_iv;
+    args.plaintext = device_plaintext;
+    args.ciphertext = device_ciphertext;
+    args.msg_len = msg_len;
     args.repeat = repeat;
 
     for (int i = 0; i < 5; ++i) {
         BenchKernel<<<1, nullptr, stream>>>(&args, sizeof(args));
     }
     if (!CheckAcl("aclrtSynchronizeStream warmup", aclrtSynchronizeStream(stream))) {
-        aclrtFree(device_output);
-        aclrtFree(device_input);
+        aclrtFree(device_ciphertext);
+        aclrtFree(device_plaintext);
+        aclrtFree(device_iv);
+        aclrtFree(device_key);
         aclrtDestroyStream(stream);
         aclrtResetDevice(0);
         aclFinalize();
-        free(host_input);
+        free(host_plaintext);
+        free(host_iv);
+        free(host_key);
         return 1;
     }
 
@@ -118,56 +177,81 @@ int main() {
         BenchKernel<<<1, nullptr, stream>>>(&args, sizeof(args));
     }
     if (!CheckAcl("aclrtSynchronizeStream benchmark", aclrtSynchronizeStream(stream))) {
-        aclrtFree(device_output);
-        aclrtFree(device_input);
+        aclrtFree(device_ciphertext);
+        aclrtFree(device_plaintext);
+        aclrtFree(device_iv);
+        aclrtFree(device_key);
         aclrtDestroyStream(stream);
         aclrtResetDevice(0);
         aclFinalize();
-        free(host_input);
+        free(host_plaintext);
+        free(host_iv);
+        free(host_key);
         return 1;
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
 
-    int *host_output = nullptr;
-    if (!CheckAcl("aclrtMallocHost", aclrtMallocHost((void **)&host_output, output_bytes))) {
-        aclrtFree(device_output);
-        aclrtFree(device_input);
+    uint8 *host_ciphertext = nullptr;
+    if (!CheckAcl("aclrtMallocHost", aclrtMallocHost((void **)&host_ciphertext, output_bytes))) {
+        aclrtFree(device_ciphertext);
+        aclrtFree(device_plaintext);
+        aclrtFree(device_iv);
+        aclrtFree(device_key);
         aclrtDestroyStream(stream);
         aclrtResetDevice(0);
         aclFinalize();
-        free(host_input);
+        free(host_plaintext);
+        free(host_iv);
+        free(host_key);
         return 1;
     }
 
-    if (!CheckAcl("aclrtMemcpy D2H",
-                  aclrtMemcpy(host_output, output_bytes, device_output, output_bytes,
+    if (!CheckAcl("aclrtMemcpy ciphertext D2H",
+                  aclrtMemcpy(host_ciphertext, output_bytes, device_ciphertext, output_bytes,
                               ACL_MEMCPY_DEVICE_TO_HOST))) {
-        aclrtFreeHost(host_output);
-        aclrtFree(device_output);
-        aclrtFree(device_input);
+        aclrtFreeHost(host_ciphertext);
+        aclrtFree(device_ciphertext);
+        aclrtFree(device_plaintext);
+        aclrtFree(device_iv);
+        aclrtFree(device_key);
         aclrtDestroyStream(stream);
         aclrtResetDevice(0);
         aclFinalize();
-        free(host_input);
+        free(host_plaintext);
+        free(host_iv);
+        free(host_key);
         return 1;
     }
 
     {
+        unsigned int checksum = 0;
         double total_us = ElapsedUs(&start, &end);
         double launch_us = total_us / (double)launches;
         double call_ns = (total_us * 1000.0) / ((double)launches * (double)repeat);
-        printf("result=%d\n", host_output[0]);
+        for (size_t i = 0; i < msg_len; ++i) {
+            checksum = (checksum * 131u) + host_ciphertext[i];
+        }
+        printf("ciphertext checksum=0x%08x\n", checksum);
+        printf("ciphertext[0..15]=");
+        for (size_t i = 0; i < 16 && i < msg_len; ++i) {
+            printf(" %02x", host_ciphertext[i]);
+        }
+        printf("\n");
         printf("total launch+sync time: %.3f us\n", total_us);
         printf("avg per kernel launch: %.3f us\n", launch_us);
-        printf("approx avg per bench_target_sum call: %.3f ns\n", call_ns);
+        printf("approx avg per func call: %.3f ns\n", call_ns);
     }
 
-    aclrtFreeHost(host_output);
-    aclrtFree(device_output);
-    aclrtFree(device_input);
+    aclrtFreeHost(host_ciphertext);
+    aclrtFree(device_ciphertext);
+    aclrtFree(device_plaintext);
+    aclrtFree(device_iv);
+    aclrtFree(device_key);
     aclrtDestroyStream(stream);
     aclrtResetDevice(0);
     aclFinalize();
-    free(host_input);
+    free(host_plaintext);
+    free(host_iv);
+    free(host_key);
     return 0;
 }
