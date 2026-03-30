@@ -38,4 +38,12 @@ void func(const uint8 *key, const uint8 *iv, const uint8 *plaintext,
 5. Start with tiny values in `bench_main.cce` (`msg_len = 64`, `repeat = 1`, `warmups = 1`, `launches = 1`) and raise them gradually after correctness is confirmed.
 6. Adjust the key and IV lengths in `bench_main.cce` to match your algorithm.
 
+The benchmark summary prints throughput as both `GB/s` (10^9 bytes/second) and `GiB/s` (2^30 bytes/second), computed from:
+
+```text
+timed encrypted bytes = msg_len * repeat * launches
+```
+
+For a more stable throughput number after correctness is confirmed, increase `msg_len`, `repeat`, and `launches`.
+
 This template keeps `bench_target.c` in the same AICPU translation unit by including it from `bench.aicpu`.
