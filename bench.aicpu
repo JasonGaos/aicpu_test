@@ -2,8 +2,6 @@
 #include "bench_target.h"
 
 // The AICPU device build needs the implementation in the same translation unit.
-// Pull in the AES implementation first, then the thin benchmark wrappers.
-#include "../aes/aes.c"
 #include "bench_target.c"
 
 struct BenchArgs {
