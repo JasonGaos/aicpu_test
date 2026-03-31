@@ -1,8 +1,9 @@
 #include "aicpu_api.h"
 #include "bench_target.h"
 
-// Header declarations alone are not enough on AICPU. The implementation must
-// also be compiled into the same device translation unit.
+// The AICPU device build needs the implementation in the same translation unit.
+// Pull in the AES implementation first, then the thin benchmark wrappers.
+#include "../aes/aes.c"
 #include "bench_target.c"
 
 struct BenchArgs {

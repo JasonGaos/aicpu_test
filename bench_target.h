@@ -9,6 +9,9 @@ typedef uint8_t uint8;
 #define BENCH_UINT8_TYPE
 #endif
 
+#define BENCH_KEY_BYTES 16u
+#define BENCH_IV_BYTES 16u
+
 #ifdef __cplusplus
 extern "C" {
 #endif
